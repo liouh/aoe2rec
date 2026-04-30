@@ -239,9 +239,25 @@ pub enum ActionData {
     Build {
         player_id: u8,
         action_length: u16,
-        #[br(count = length - 1 - 3)]
-        data: Vec<u8>,
+        /// Number of villagers selected to perform the build.
+        selected: i16,
+        #[br(pad_before = 2)]
+        /// Map X coordinate of building placement.
+        x: f32,
+        /// Map Y coordinate of building placement.
+        y: f32,
+        /// Building type ID — maps to buildings.csv.
+        building_type_id: u32,
+        unknown_p1: u32,
+        unknown_p2: u32,
+        unknown2: i16,
+        unknown3: i8,
+        unknown4: i8,
+        /// Instance IDs of the villagers assigned to build.
+        #[br(count = if selected > 0 { selected as usize } else { 0 })]
+        villager_ids: Vec<u32>,
     },
+
     #[br(magic = 103u8)]
     Game {
         player_id: u8,
@@ -266,8 +282,9 @@ pub enum ActionData {
     Delete {
         player_id: u8,
         action_length: u16,
-        #[br(count = length - 1 - 3)]
-        data: Vec<u8>,
+        object_id: u32,
+        #[br(pad_after = (action_length as i64).saturating_sub(4).max(0))]
+        unknown: (),
     },
     #[br(magic = 107u8)]
     AttackGround {
@@ -346,8 +363,13 @@ pub enum ActionData {
     Queue {
         player_id: u8,
         action_length: u16,
-        #[br(count = length - 1 - 3)]
-        data: Vec<u8>,
+        building_id: u32,
+        unit_type: u16,
+        count: u16,
+        unknown1: [u8; 4],
+        selected: u16,
+        #[br(count = selected)]
+        building_ids: Vec<u32>,
     },
     #[br(magic = 120u8)]
     Gatherpoint {
@@ -450,7 +472,7 @@ pub enum ActionData {
 }
 
 #[binrw]
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, PartialEq, Eq)]
 #[brw(repr(u8))]
 pub enum OrderType {
     Pack = 1,
