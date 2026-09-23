@@ -13,8 +13,7 @@ use serde::Serialize;
 pub fn decompress(header_data: Vec<u8>) -> RecHeader {
     let (header, _) = yazi::decompress(&header_data, yazi::Format::Raw).unwrap();
     let mut hreader = BufReader::new(Cursor::new(header));
-    let parsed_header: RecHeader = hreader.read_le().unwrap();
-    return parsed_header;
+    hreader.read_le().unwrap()
 }
 
 #[binrw]
@@ -37,6 +36,16 @@ pub struct RecHeader {
     pub map_info: MapInfo,
     #[br(args(replay.num_players, version_major, build, map_info.size_x, map_info.size_y))]
     pub initial: Initial,
+}
+
+impl RecHeader {
+    pub fn players(&self) -> &Vec<Player> {
+        &self.game_settings.players
+    }
+
+    pub fn save_version(&self) -> String {
+        format!("{}.{}", self.version_major, self.version_minor)
+    }
 }
 
 #[binrw]
@@ -355,7 +364,7 @@ pub struct Player {
     pub ai_civ_name_index: u8,
     pub ai_name: DeString,
     #[br(if(major >= 66))]
-    pub censored_name: DeString,
+    pub censored_name: Option<DeString>,
     pub name: DeString,
     pub player_type: u32,
     pub profile_id: i32,
@@ -366,9 +375,9 @@ pub struct Player {
     pub unknown_handicap: [u8; 4],
     pub handicap: i32,
     #[br(if(major >= 64))]
-    pub unknown_de_64_19661: u32,
+    pub unknown_de_64_19661: Option<u32>,
     #[br(if(major >= 67))]
-    pub unknown_de_67_2: DeString,
+    pub unknown_de_67_2: Option<DeString>,
 }
 
 #[binrw]
@@ -388,7 +397,7 @@ pub struct EmptySlot {
     pub i2: u32,
     pub a4: [u8; 8],
     #[br(if(major >= 64))]
-    pub unknown_de_64_19661: u32,
+    pub unknown_de_64_19661: Option<u32>,
 }
 
 #[binrw]
@@ -450,7 +459,7 @@ pub struct InnerUnknownPlayerStruct {
     pub unknown1: DeString,
     pub unknown2: DeString,
     #[br(if(build >= 185000))]
-    pub unknown_destring3: Option<DeString>,
+    pub unknown_68_9: Option<DeString>,
     pub unknown3: [u16; 16],
     #[br(if(major >= 66))]
     pub unknown5: InnerUnknownPlayerStruct2,

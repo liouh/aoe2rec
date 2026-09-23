@@ -2,60 +2,87 @@ pub mod actions;
 pub mod header;
 pub mod minimal;
 pub mod summary;
-mod tests;
 
-use binrw::io::{BufReader, Cursor, SeekFrom};
+use binrw::helpers::until_eof;
+use binrw::io::{BufReader, Cursor, SeekFrom, TakeSeekExt};
 use binrw::{binrw, BinReaderExt, BinResult, BinWriterExt, NullString};
+use chrono::{DateTime, Utc};
 use header::{decompress, RecHeader};
 use serde::Serialize;
 use std::error::Error;
 use std::fs::File;
 use summary::GameTeam;
 
+use crate::header::Player;
+
 #[binrw]
 #[derive(Serialize)]
+#[br(stream = s)]
 pub struct Savegame {
-    pub length: u32,
-    pub other: u32,
-    #[br(count = length - 8, map = decompress)]
+    #[br(parse_with=until_eof)]
+    pub chapters: Vec<Chapter>,
+}
+
+impl Savegame {
+    pub fn header(&self) -> Option<&RecHeader> {
+        if self.chapters.is_empty() {
+            None
+        } else {
+            Some(&self.chapters[0].zheader)
+        }
+    }
+
+    pub fn operations(&self) -> impl Iterator<Item = &Operation> {
+        self.chapters.iter().flat_map(|c| c.operations.iter())
+    }
+    pub fn played_at(&self) -> DateTime<Utc> {
+        DateTime::from_timestamp_secs(self.header().unwrap().timestamp.into()).unwrap()
+    }
+
+    pub fn is_restored(&self) -> bool {
+        self.world_time() > 0
+    }
+
+    pub fn world_time(&self) -> u32 {
+        self.header().unwrap().replay.world_time
+    }
+
+    pub fn players(&self) -> &Vec<Player> {
+        self.header().unwrap().players()
+    }
+}
+
+fn chapter_size(current_offset: u64, next_offset: u64) -> u64 {
+    if next_offset == 0 {
+        return u32::MAX as u64;
+    }
+    next_offset.saturating_sub(current_offset)
+}
+
+#[binrw]
+#[derive(Serialize)]
+#[br(stream = s)]
+pub struct Chapter {
+    pub header_end: u32,
+    #[br(calc=<u64>::from(header_end) - s.stream_position().unwrap())]
+    header_len: u64,
+    pub next_chapter_address: u32,
+    // #[br(if(next_chapter_address >0), parse_with=binrw::FilePtr32::parse, ski)]
+    // pub next_chapter: Option<Box<Savegame>>,
+    #[br(count = header_len - 4, map = decompress)]
     pub zheader: RecHeader,
-    pub log_version: u32,
-    pub meta: Meta,
+    #[br(temp, try_calc= s.stream_position())]
+    #[bw(ignore)]
+    current_address: u64,
+    #[br(map_stream = |r| r.take_seek(chapter_size(current_address, next_chapter_address as u64)))]
     #[br(parse_with = parse_operations, args(zheader.version_major))]
     pub operations: Vec<Operation>,
 }
 
 #[binrw]
 #[derive(Serialize, Debug)]
-pub struct Meta {
-    pub checksum_interval: u32,
-    #[br(pad_after = 3)]
-    #[bw(pad_after = 3)]
-    pub multiplayer: Bool,
-    pub rec_owner: u32,
-    #[br(pad_after = 3)]
-    #[bw(pad_after = 3)]
-    pub reveal_map: Bool,
-    pub use_sequence_numbers: u32,
-    pub number_of_chapters: u32,
-    pub aok_or_de: u32,
-}
-
-#[binrw]
-#[br(stream = s)]
-#[derive(Serialize, Debug)]
-pub struct ChapterData {
-    chapter_end: u32,
-    chapter_address: u32,
-    #[br(calc=s.stream_position().unwrap())]
-    current_position: u64,
-    #[br(count = (chapter_end as u64) - current_position)]
-    chapter_data: Vec<u8>,
-}
-
-#[binrw]
-#[derive(Serialize, Debug)]
 #[br(import(major: u16))]
+#[allow(clippy::large_enum_variant)]
 pub enum Operation {
     #[br(magic = 1u32)]
     Action {
@@ -69,9 +96,7 @@ pub enum Operation {
         })]
         action_data: Option<actions::ActionData>,
         world_time: u32,
-        #[serde(skip_serializing)]
-        #[br(if(matches!(action_data, Some(actions::ActionData::Chapter { player_id: _, action_length: _ }))))]
-        chap: Option<ChapterData>,
+
     },
     #[br(magic = 2u32)]
     Sync {
@@ -86,11 +111,14 @@ pub enum Operation {
     #[br(magic = 4u32)]
     Chat { padding: [u8; 4], text: LenString },
     #[br(magic = 5u32)]
-    AddAttribute {
-        player_id: u8,
-        #[br(pad_after = 1)]
-        attribute: u8,
-        amount: f32,
+    Pregame {
+        checksum_interval: u32,
+        multiplayer: Bool32,
+        rec_owner: u32,
+        reveal_map: Bool32,
+        use_sequence_numbers: Bool32,
+        number_of_chapters: u32,
+        aok_or_de: Bool32,
     },
     #[br(magic = 6u32)]
     PostGame {
@@ -225,6 +253,35 @@ pub struct Bool {
     value: bool,
 }
 
+#[binrw]
+#[derive(Copy, Clone)]
+pub struct Bool32 {
+    #[br(map = |x: u32| x == 1)]
+    #[bw(map = |x: &bool| if *x { 1u32 } else {  0u32})]
+    value: bool,
+}
+
+impl Serialize for Bool32 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bool(self.value)
+    }
+}
+
+impl From<Bool32> for bool {
+    fn from(val: Bool32) -> Self {
+        val.value
+    }
+}
+
+impl std::fmt::Debug for Bool32 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value)
+    }
+}
+
 impl std::fmt::Debug for Bool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.value)
@@ -246,9 +303,9 @@ impl From<bool> for Bool {
     }
 }
 
-impl Into<bool> for Bool {
-    fn into(self) -> bool {
-        self.value
+impl From<Bool> for bool {
+    fn from(val: Bool) -> Self {
+        val.value
     }
 }
 
@@ -271,8 +328,7 @@ pub struct LenString16 {
 #[binrw]
 #[derive(Clone, Default)]
 pub struct DeString {
-    #[br(magic = b"\x60\x0A")]
-    #[bw(magic = b"\x60\x0A")]
+    #[brw(magic = b"\x60\x0A")]
     #[bw(calc(value.len().try_into().unwrap()))]
     length: u16,
     #[br(count = length)]
@@ -293,9 +349,9 @@ impl From<&String> for DeString {
     }
 }
 
-impl Into<String> for DeString {
-    fn into(self) -> String {
-        std::string::String::from_utf8_lossy(&self.value).to_string()
+impl From<DeString> for String {
+    fn from(val: DeString) -> Self {
+        std::string::String::from_utf8_lossy(&val.value).to_string()
     }
 }
 
@@ -311,9 +367,9 @@ impl From<String> for MyNullString {
     }
 }
 
-impl Into<String> for MyNullString {
-    fn into(self) -> String {
-        self.text.to_string()
+impl From<MyNullString> for String {
+    fn from(val: MyNullString) -> Self {
+        val.text.to_string()
     }
 }
 
@@ -373,35 +429,36 @@ impl Savegame {
     pub fn from_bytes(data: bytes::Bytes) -> Result<Savegame, Box<dyn Error>> {
         let mut breader = BufReader::new(Cursor::new(data));
         let savegame: Savegame = breader.read_le()?;
-        return Ok(savegame);
+        Ok(savegame)
     }
     pub fn from_file(path: &std::path::Path) -> Result<Savegame, Box<dyn Error>> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
         let savegame: Savegame = reader.read_le()?;
-        return Ok(savegame);
+        Ok(savegame)
     }
 
     pub fn get_duration(&self) -> u32 {
-        self.operations
-            .iter()
-            .fold(self.zheader.replay.world_time, |duration, operation| {
-                return match operation {
-                    Operation::Sync { time_increment, .. } => duration + time_increment,
-                    _ => duration,
-                };
-            })
+        self.chapters[0].operations.iter().fold(
+            self.chapters[0].zheader.replay.world_time,
+            |duration, operation| match operation {
+                Operation::Sync { time_increment, .. } => duration + time_increment,
+                _ => duration,
+            },
+        )
     }
 
     pub fn get_resignations(&self) -> Vec<u8> {
-        self.operations
+        self.chapters
             .iter()
-            .map(|operation| match operation {
-                Operation::Action { action_data, .. } => match action_data {
-                    Some(actions::ActionData::Resign { player_id, .. }) => *player_id,
+            .flat_map(|chapter| {
+                chapter.operations.iter().map(|operation| match operation {
+                    Operation::Action {
+                        action_data: Some(actions::ActionData::Resign { player_id, .. }),
+                        ..
+                    } => *player_id,
                     _ => 100,
-                },
-                _ => 100,
+                })
             })
             .filter(|player_id| *player_id < 100)
             .collect()
@@ -410,13 +467,13 @@ impl Savegame {
     pub fn get_summary(&self) -> summary::SavegameSummary<'_> {
         summary::SavegameSummary {
             header: summary::SummaryHeader {
-                game: &self.zheader.game,
-                version_minor: self.zheader.version_minor,
-                version_major: self.zheader.version_major,
-                build: self.zheader.build,
-                timestamp: self.zheader.timestamp,
-                game_settings: &self.zheader.game_settings,
-                replay: &self.zheader.replay,
+                game: &self.chapters[0].zheader.game,
+                version_minor: self.chapters[0].zheader.version_minor,
+                version_major: self.chapters[0].zheader.version_major,
+                build: self.chapters[0].zheader.build,
+                timestamp: self.chapters[0].zheader.timestamp,
+                game_settings: &self.chapters[0].zheader.game_settings,
+                replay: &self.chapters[0].zheader.replay,
             },
             duration: self.get_duration(),
             resignations: self.get_resignations(),
@@ -439,7 +496,7 @@ fn read_strings_of_length() -> BinResult<Vec<DeString>> {
     Ok(strings)
 }
 
-fn parse_operations<R: binrw::io::Read + binrw::io::Seek>(
+pub fn parse_operations<R: binrw::io::Read + binrw::io::Seek>(
     reader: &mut R,
     endian: binrw::Endian,
     args: (u16,),
@@ -479,8 +536,9 @@ fn parse_operations<R: binrw::io::Read + binrw::io::Seek>(
 #[binrw::writer(writer, endian)]
 fn write_len_and_string(strings: &Vec<DeString>) -> BinResult<()> {
     for string in strings {
+        writer.write_type(&0u32, endian)?;
         writer.write_type(&string, endian)?;
     }
-    writer.write_type(&0u32, endian)?;
+    writer.write_type(&1u32, endian)?;
     Ok(())
 }
