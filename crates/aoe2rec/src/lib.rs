@@ -503,9 +503,12 @@ pub fn parse_operations<R: binrw::io::Read + binrw::io::Seek>(
 ) -> binrw::BinResult<Vec<Operation>> {
     let mut operations = Vec::new();
     loop {
+        let position_before_read = reader.stream_position()?;
         let magic_res: binrw::BinResult<u32> = reader.read_type(endian);
         if let Err(e) = magic_res {
-            if matches!(e, binrw::Error::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::UnexpectedEof) {
+            if reader.stream_position()? == position_before_read
+                || matches!(e, binrw::Error::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::UnexpectedEof)
+            {
                 break;
             }
             return Err(e);
@@ -513,6 +516,9 @@ pub fn parse_operations<R: binrw::io::Read + binrw::io::Seek>(
         let magic = magic_res.unwrap();
         if magic == 0 || magic > 100 {
             reader.seek(std::io::SeekFrom::Current(-3))?;
+            if reader.stream_position()? <= position_before_read {
+                break;
+            }
             continue;
         }
         reader.seek(std::io::SeekFrom::Current(-4))?;
@@ -527,6 +533,9 @@ pub fn parse_operations<R: binrw::io::Read + binrw::io::Seek>(
             Err(_) => {
                 // Skip one byte and try to re-sync if parsing failed
                 reader.seek(std::io::SeekFrom::Current(-3))?;
+                if reader.stream_position()? <= position_before_read {
+                    break;
+                }
             }
         }
     }
