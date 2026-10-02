@@ -9,6 +9,15 @@ fn it_parses_recs_with_multiple_chapters() {
         .clone()
         .into();
     assert_eq!(player1, "Fallingstar");
+    assert_eq!(savegame.chapters.len(), 9);
+    // Chapter 0 only had a duration of 650,702 ms, whereas total game duration is 2,692,367 ms
+    assert_eq!(savegame.get_duration(), 2692367);
+}
+
+#[test]
+fn test_get_duration_empty_chapters() {
+    let savegame = Savegame { chapters: vec![] };
+    assert_eq!(savegame.get_duration(), 0);
 }
 
 #[test]

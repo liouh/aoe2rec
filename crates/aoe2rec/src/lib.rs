@@ -110,7 +110,7 @@ pub enum Operation {
     Viewlock { x: f32, y: f32, player_id: u32 },
     #[br(magic = 4u32)]
     Chat { padding: [u8; 4], text: LenString },
-    #[br(magic = 5u32)]
+    #[br(magic = 0xFFFFFFFFu32)]
     Pregame {
         checksum_interval: u32,
         multiplayer: Bool32,
@@ -119,6 +119,11 @@ pub enum Operation {
         use_sequence_numbers: Bool32,
         number_of_chapters: u32,
         aok_or_de: Bool32,
+    },
+    #[br(magic = 5u32)]
+    Unknown5 {
+        unknown1: i32,
+        unknown2: u32,
     },
     #[br(magic = 6u32)]
     PostGame {
@@ -215,6 +220,18 @@ pub struct LeaderboardPlayer {
     pub player_number: i32,
     pub rank: i32,
     pub elo: i32,
+}
+
+#[binrw]
+#[derive(Serialize, Debug, Clone)]
+pub struct PregameData {
+    pub checksum_interval: u32,
+    pub multiplayer: Bool32,
+    pub rec_owner: u32,
+    pub reveal_map: Bool32,
+    pub use_sequence_numbers: Bool32,
+    pub number_of_chapters: u32,
+    pub aok_or_de: Bool32,
 }
 
 #[binrw]
@@ -439,13 +456,16 @@ impl Savegame {
     }
 
     pub fn get_duration(&self) -> u32 {
-        self.chapters[0].operations.iter().fold(
-            self.chapters[0].zheader.replay.world_time,
-            |duration, operation| match operation {
-                Operation::Sync { time_increment, .. } => duration + time_increment,
-                _ => duration,
-            },
-        )
+        let initial_time = self
+            .chapters
+            .first()
+            .map(|c| c.zheader.replay.world_time)
+            .unwrap_or(0);
+
+        self.operations().fold(initial_time, |duration, operation| match operation {
+            Operation::Sync { time_increment, .. } => duration + time_increment,
+            _ => duration,
+        })
     }
 
     pub fn get_resignations(&self) -> Vec<u8> {
@@ -514,11 +534,26 @@ pub fn parse_operations<R: binrw::io::Read + binrw::io::Seek>(
             return Err(e);
         }
         let magic = magic_res.unwrap();
-        if magic == 0 || magic > 100 {
-            reader.seek(std::io::SeekFrom::Current(-3))?;
-            if reader.stream_position()? <= position_before_read {
-                break;
+        if operations.is_empty() && magic == 5 {
+            let pregame_res: binrw::BinResult<PregameData> = reader.read_type(endian);
+            if let Ok(p) = pregame_res {
+                operations.push(Operation::Pregame {
+                    checksum_interval: p.checksum_interval,
+                    multiplayer: p.multiplayer,
+                    rec_owner: p.rec_owner,
+                    reveal_map: p.reveal_map,
+                    use_sequence_numbers: p.use_sequence_numbers,
+                    number_of_chapters: p.number_of_chapters,
+                    aok_or_de: p.aok_or_de,
+                });
+                continue;
+            } else {
+                reader.seek(std::io::SeekFrom::Start(position_before_read + 1))?;
+                continue;
             }
+        }
+        if magic == 0 || magic > 100 {
+            reader.seek(std::io::SeekFrom::Start(position_before_read + 1))?;
             continue;
         }
         reader.seek(std::io::SeekFrom::Current(-4))?;
@@ -531,11 +566,8 @@ pub fn parse_operations<R: binrw::io::Read + binrw::io::Seek>(
                 }
             }
             Err(_) => {
-                // Skip one byte and try to re-sync if parsing failed
-                reader.seek(std::io::SeekFrom::Current(-3))?;
-                if reader.stream_position()? <= position_before_read {
-                    break;
-                }
+                // Skip one byte from position_before_read and try to re-sync if parsing failed
+                reader.seek(std::io::SeekFrom::Start(position_before_read + 1))?;
             }
         }
     }
