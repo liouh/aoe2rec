@@ -268,3 +268,11 @@ fn test_load_shared_control_replay() {
     assert_eq!(save.get_duration(), 2161380);
     assert_eq!(save.operations().count(), 144051);
 }
+
+#[test]
+fn test_parse_campaign_replay() {
+    let path = Path::new("replay-campaign.aoe2record");
+    let save = Savegame::from_file(path).unwrap();
+    assert_eq!(save.get_duration(), 8088016);
+    assert_eq!(save.operations().count(), 1654314);
+}

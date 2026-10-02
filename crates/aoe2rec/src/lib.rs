@@ -71,7 +71,7 @@ pub struct Chapter {
     // pub next_chapter: Option<Box<Savegame>>,
     #[br(count = header_len - 4, map = decompress)]
     pub zheader: RecHeader,
-    #[br(temp, try_calc= s.stream_position())]
+    #[br(temp, try_calc = s.stream_position())]
     #[bw(ignore)]
     current_address: u64,
     #[br(map_stream = |r| r.take_seek(chapter_size(current_address, next_chapter_address as u64)))]
@@ -110,6 +110,11 @@ pub enum Operation {
     Viewlock { x: f32, y: f32, player_id: u32 },
     #[br(magic = 4u32)]
     Chat { padding: [u8; 4], text: LenString },
+    // In AoE2 recordings, chapter initialization begins with a 28-byte Pregame block
+    // (prefixed with opcode 5). During gameplay, modern DE builds also emit 12-byte
+    // simulation operations with opcode 5 (Unknown5).
+    // Pregame is parsed explicitly at stream offset 0, while 0xFFFFFFFF prevents binrw's
+    // generated Operation enum parser from mistakenly matching mid-game opcode 5 as Pregame.
     #[br(magic = 0xFFFFFFFFu32)]
     Pregame {
         checksum_interval: u32,
@@ -232,6 +237,29 @@ pub struct PregameData {
     pub use_sequence_numbers: Bool32,
     pub number_of_chapters: u32,
     pub aok_or_de: Bool32,
+}
+
+impl PregameData {
+    pub fn is_valid(&self) -> bool {
+        self.checksum_interval >= 10
+            && self.checksum_interval <= 10_000
+            && self.number_of_chapters >= 1
+            && self.number_of_chapters <= 1_000
+    }
+}
+
+impl From<PregameData> for Operation {
+    fn from(p: PregameData) -> Self {
+        Operation::Pregame {
+            checksum_interval: p.checksum_interval,
+            multiplayer: p.multiplayer,
+            rec_owner: p.rec_owner,
+            reveal_map: p.reveal_map,
+            use_sequence_numbers: p.use_sequence_numbers,
+            number_of_chapters: p.number_of_chapters,
+            aok_or_de: p.aok_or_de,
+        }
+    }
 }
 
 #[binrw]
@@ -484,21 +512,27 @@ impl Savegame {
             .collect()
     }
 
-    pub fn get_summary(&self) -> summary::SavegameSummary<'_> {
-        summary::SavegameSummary {
+    pub fn try_get_summary(&self) -> Option<summary::SavegameSummary<'_>> {
+        let first_chapter = self.chapters.first()?;
+        Some(summary::SavegameSummary {
             header: summary::SummaryHeader {
-                game: &self.chapters[0].zheader.game,
-                version_minor: self.chapters[0].zheader.version_minor,
-                version_major: self.chapters[0].zheader.version_major,
-                build: self.chapters[0].zheader.build,
-                timestamp: self.chapters[0].zheader.timestamp,
-                game_settings: &self.chapters[0].zheader.game_settings,
-                replay: &self.chapters[0].zheader.replay,
+                game: &first_chapter.zheader.game,
+                version_minor: first_chapter.zheader.version_minor,
+                version_major: first_chapter.zheader.version_major,
+                build: first_chapter.zheader.build,
+                timestamp: first_chapter.zheader.timestamp,
+                game_settings: &first_chapter.zheader.game_settings,
+                replay: &first_chapter.zheader.replay,
             },
             duration: self.get_duration(),
             resignations: self.get_resignations(),
             teams: GameTeam::from_savegame(self),
-        }
+        })
+    }
+
+    pub fn get_summary(&self) -> summary::SavegameSummary<'_> {
+        self.try_get_summary()
+            .expect("cannot get summary of Savegame with no chapters")
     }
 }
 
@@ -534,29 +568,23 @@ pub fn parse_operations<R: binrw::io::Read + binrw::io::Seek>(
             return Err(e);
         }
         let magic = magic_res.unwrap();
+        // The chapter-start Pregame block only appears at the start of the chapter operations stream
         if operations.is_empty() && magic == 5 {
             let pregame_res: binrw::BinResult<PregameData> = reader.read_type(endian);
             if let Ok(p) = pregame_res {
-                operations.push(Operation::Pregame {
-                    checksum_interval: p.checksum_interval,
-                    multiplayer: p.multiplayer,
-                    rec_owner: p.rec_owner,
-                    reveal_map: p.reveal_map,
-                    use_sequence_numbers: p.use_sequence_numbers,
-                    number_of_chapters: p.number_of_chapters,
-                    aok_or_de: p.aok_or_de,
-                });
-                continue;
-            } else {
-                reader.seek(std::io::SeekFrom::Start(position_before_read + 1))?;
-                continue;
+                if p.is_valid() {
+                    operations.push(p.into());
+                    continue;
+                }
             }
+            reader.seek(std::io::SeekFrom::Start(position_before_read + 1))?;
+            continue;
         }
         if magic == 0 || magic > 100 {
             reader.seek(std::io::SeekFrom::Start(position_before_read + 1))?;
             continue;
         }
-        reader.seek(std::io::SeekFrom::Current(-4))?;
+        reader.seek(std::io::SeekFrom::Start(position_before_read))?;
         let res: binrw::BinResult<Operation> = reader.read_type_args(endian, (args.0,));
         match res {
             Ok(op) => {
