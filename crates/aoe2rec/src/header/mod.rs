@@ -690,6 +690,9 @@ fn parse_object_instance_at(
         return None;
     }
     let object_type_id = u16::from_le_bytes([rest[cursor + 2], rest[cursor + 3]]);
+    if object_type_id == 0 {
+        return None;
+    }
 
     let object_id = u32::from_le_bytes([
         rest[cursor + 18],
@@ -697,7 +700,7 @@ fn parse_object_instance_at(
         rest[cursor + 20],
         rest[cursor + 21],
     ]);
-    if object_id == 0 || object_id > 5_000_000 {
+    if object_id > 5_000_000 {
         return None;
     }
 
