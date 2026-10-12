@@ -276,3 +276,154 @@ fn test_parse_campaign_replay() {
     assert_eq!(save.get_duration(), 8088016);
     assert_eq!(save.operations().count(), 1654314);
 }
+
+#[test]
+fn test_parse_synthetic_de_sync_checksum() {
+    let mut data = Vec::new();
+    // Magic 2 (Sync)
+    data.extend_from_slice(&2u32.to_le_bytes());
+    // time_increment = 100
+    data.extend_from_slice(&100u32.to_le_bytes());
+    // Checksum marker (next == 0)
+    data.extend_from_slice(&0u32.to_le_bytes());
+
+    // 88 u32s for 8 players
+    for slot in 0..8 {
+        if slot == 0 {
+            // Player 1
+            data.extend_from_slice(&0u32.to_le_bytes()); // val 0: unknown
+            data.extend_from_slice(&500u32.to_le_bytes()); // val 1: total_resources
+            data.extend_from_slice(&123u32.to_le_bytes()); // val 2: unknown
+            data.extend_from_slice(&15u32.to_le_bytes()); // val 3: displayable_objects (sequence)
+            data.extend_from_slice(&250u32.to_le_bytes()); // val 4: dp_obj_ttl
+            data.extend_from_slice(&0u32.to_le_bytes()); // val 5: unknown
+            data.extend_from_slice(&8u32.to_le_bytes()); // val 6: total_objects
+            data.extend_from_slice(&99u32.to_le_bytes()); // val 7: unknown
+            data.extend_from_slice(&1u32.to_le_bytes()); // val 8: player_id = 1
+            data.extend_from_slice(&0u32.to_le_bytes()); // val 9: unknown
+            data.extend_from_slice(&0u32.to_le_bytes()); // val 10: unknown
+        } else if slot == 2 {
+            // Player 3
+            data.extend_from_slice(&0u32.to_le_bytes());
+            data.extend_from_slice(&800u32.to_le_bytes()); // total_resources
+            data.extend_from_slice(&0u32.to_le_bytes());
+            data.extend_from_slice(&20u32.to_le_bytes()); // displayable_objects
+            data.extend_from_slice(&300u32.to_le_bytes()); // dp_obj_ttl
+            data.extend_from_slice(&0u32.to_le_bytes());
+            data.extend_from_slice(&12u32.to_le_bytes()); // total_objects
+            data.extend_from_slice(&0u32.to_le_bytes());
+            data.extend_from_slice(&3u32.to_le_bytes()); // player_id = 3
+            data.extend_from_slice(&0u32.to_le_bytes());
+            data.extend_from_slice(&0u32.to_le_bytes());
+        } else {
+            // Empty slots (all 0s)
+            for _ in 0..11 {
+                data.extend_from_slice(&0u32.to_le_bytes());
+            }
+        }
+    }
+    // Trailing current_time_ms = 45000
+    data.extend_from_slice(&45000u32.to_le_bytes());
+
+    let mut cursor = Cursor::new(data);
+    let op: Operation = cursor.read_le_args((1u16,)).unwrap();
+    if let Operation::Sync {
+        time_increment,
+        checksum: Some(cs),
+        ..
+    } = &op
+    {
+        assert_eq!(*time_increment, 100);
+        assert_eq!(cs.current_time_ms, Some(45000));
+        assert_eq!(cs.player_stats.len(), 2);
+
+        assert_eq!(cs.player_stats[0].player_id, 1);
+        assert_eq!(cs.player_stats[0].total_resources, 500);
+        assert_eq!(cs.player_stats[0].displayable_objects, 15);
+        assert_eq!(cs.player_stats[0].dp_obj_ttl, 250);
+        assert_eq!(cs.player_stats[0].total_objects, 8);
+
+        assert_eq!(cs.player_stats[1].player_id, 3);
+        assert_eq!(cs.player_stats[1].total_resources, 800);
+        assert_eq!(cs.player_stats[1].displayable_objects, 20);
+        assert_eq!(cs.player_stats[1].dp_obj_ttl, 300);
+        assert_eq!(cs.player_stats[1].total_objects, 12);
+
+        // Test serde serialization
+        let json = serde_json::to_string(cs).unwrap();
+        assert!(json.contains("\"total_resources\":500"));
+        assert!(json.contains("\"current_time_ms\":45000"));
+
+        let deserialized: aoe2rec::SyncChecksum = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, *cs);
+    } else {
+        panic!("Expected Sync operation with checksum");
+    }
+}
+
+#[test]
+fn test_parse_synthetic_non_de_sync_checksum() {
+    let mut data = Vec::new();
+    // Magic 2 (Sync)
+    data.extend_from_slice(&2u32.to_le_bytes());
+    // time_increment = 50
+    data.extend_from_slice(&50u32.to_le_bytes());
+    // Checksum marker (next == 0)
+    data.extend_from_slice(&0u32.to_le_bytes());
+
+    // Non-DE block:
+    // val0 (4 bytes), sync (4 bytes), val2 (4 bytes), sequence == 0 (4 bytes)
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&1234u32.to_le_bytes()); // sync
+    data.extend_from_slice(&[1, 2, 3, 4]); // val2
+    data.extend_from_slice(&0u32.to_le_bytes()); // sequence = 0
+    data.extend_from_slice(&[9; 8]); // unknown4: 8 bytes
+
+    let mut cursor = Cursor::new(data);
+    let op: Operation = cursor.read_le_args((1u16,)).unwrap();
+    if let Operation::Sync {
+        time_increment,
+        checksum: Some(cs),
+        ..
+    } = &op
+    {
+        assert_eq!(*time_increment, 50);
+        assert_eq!(cs.sync, 1234);
+        assert_eq!(cs.sequence, 0);
+        assert!(cs.player_stats.is_empty());
+        assert_eq!(cs.current_time_ms, None);
+        assert_eq!(cs.unknown4, [9; 8]);
+    } else {
+        panic!("Expected Sync operation with non-DE checksum");
+    }
+}
+
+#[test]
+fn test_parse_truncated_de_sync_graceful() {
+    let mut data = Vec::new();
+    // Magic 2 (Sync)
+    data.extend_from_slice(&2u32.to_le_bytes());
+    data.extend_from_slice(&50u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+
+    // DE indicator (sequence > 0), but then stream ends early without the 88 u32s
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&1234u32.to_le_bytes()); // sync
+    data.extend_from_slice(&[1, 2, 3, 4]);
+    data.extend_from_slice(&5u32.to_le_bytes()); // sequence = 5 > 0
+    data.extend_from_slice(&[0; 8]); // only 8 trailing bytes instead of 340 bytes
+
+    let mut cursor = Cursor::new(data);
+    let op: Operation = cursor.read_le_args((1u16,)).unwrap();
+    if let Operation::Sync {
+        checksum: Some(cs), ..
+    } = &op
+    {
+        assert_eq!(cs.sequence, 5);
+        assert!(cs.player_stats.is_empty());
+        assert_eq!(cs.current_time_ms, None);
+    } else {
+        panic!("Expected Sync operation");
+    }
+}
+

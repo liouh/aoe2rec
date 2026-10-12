@@ -8,7 +8,7 @@ use binrw::io::{BufReader, Cursor, SeekFrom, TakeSeekExt};
 use binrw::{binrw, BinReaderExt, BinResult, BinWriterExt, NullString};
 use chrono::{DateTime, Utc};
 use header::{decompress, RecHeader};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs::File;
 use summary::GameTeam;
@@ -262,17 +262,192 @@ impl From<PregameData> for Operation {
     }
 }
 
-#[binrw]
-#[derive(Serialize, Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncPlayerStats {
+    pub player_id: u32,
+    pub total_resources: u32,
+    pub total_objects: u32,
+    pub displayable_objects: u32,
+    pub dp_obj_ttl: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SyncChecksum {
     pub unknown1: [u8; 8],
     pub sync: u32,
     pub unknown2: [u8; 4],
     pub sequence: u32,
-    #[serde(skip_serializing)]
-    #[br(if (sequence > 0))]
-    pub unknown3: Option<[u8; 332]>,
+    pub player_stats: Vec<SyncPlayerStats>,
+    pub current_time_ms: Option<u32>,
     pub unknown4: [u8; 8],
+}
+
+impl binrw::BinRead for SyncChecksum {
+    type Args<'a> = ();
+
+    fn read_options<R: binrw::io::Read + binrw::io::Seek>(
+        reader: &mut R,
+        endian: binrw::Endian,
+        _args: Self::Args<'_>,
+    ) -> binrw::BinResult<Self> {
+        parse_sync_checksum(reader, endian)
+    }
+}
+
+impl binrw::BinWrite for SyncChecksum {
+    type Args<'a> = ();
+
+    fn write_options<W: binrw::io::Write + binrw::io::Seek>(
+        &self,
+        writer: &mut W,
+        endian: binrw::Endian,
+        _args: Self::Args<'_>,
+    ) -> binrw::BinResult<()> {
+        let _ = (writer, endian);
+        Ok(())
+    }
+}
+
+pub fn parse_sync_checksum<R: binrw::io::Read + binrw::io::Seek>(
+    reader: &mut R,
+    endian: binrw::Endian,
+) -> binrw::BinResult<SyncChecksum> {
+    let marker: u32 = reader.read_type(endian)?;
+    let start_pos = reader.stream_position()?;
+
+    let val0: u32 = reader.read_type(endian)?;
+    let sync: u32 = reader.read_type(endian)?;
+    let val2: [u8; 4] = reader.read_type(endian)?;
+    let sequence: u32 = reader.read_type(endian)?;
+
+    if sequence > 0 {
+        // In DE recordings with sequence > 0, the checksum payload contains an extended
+        // table for up to 8 players (88 u32s = 352 bytes) followed by current_time_ms (u32 = 4 bytes).
+        // val0..val3 (16 bytes) were the first 4 u32s of player 1's slot.
+        // Rewind to start_pos to read all 88 u32s cleanly.
+        let mut rewind_ok = true;
+        if reader.seek(SeekFrom::Start(start_pos)).is_err() {
+            rewind_ok = false;
+        }
+
+        if rewind_ok {
+            let mut raw_stats = [0u32; 88];
+            let mut read_de_ok = true;
+            for val in &mut raw_stats {
+                match reader.read_type::<u32>(endian) {
+                    Ok(v) => *val = v,
+                    Err(_) => {
+                        read_de_ok = false;
+                        break;
+                    }
+                }
+            }
+
+            let current_time_ms: Option<u32> = if read_de_ok {
+                match reader.read_type::<u32>(endian) {
+                    Ok(t) => Some(t),
+                    Err(_) => {
+                        read_de_ok = false;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            if read_de_ok {
+                let mut player_stats = Vec::new();
+                for slot in 0..8 {
+                    let offset = slot * 11;
+                    let slot_vals = &raw_stats[offset..offset + 11];
+                    let player_id = slot_vals[8];
+                    if player_id > 0 && player_id <= 8 {
+                        player_stats.push(SyncPlayerStats {
+                            player_id,
+                            total_resources: slot_vals[1],
+                            total_objects: slot_vals[6],
+                            displayable_objects: slot_vals[3],
+                            dp_obj_ttl: slot_vals[4],
+                        });
+                    }
+                }
+
+                let mut unknown1 = [0u8; 8];
+                unknown1[0..4].copy_from_slice(&marker.to_le_bytes());
+                unknown1[4..8].copy_from_slice(&raw_stats[0].to_le_bytes());
+                let sync = raw_stats[1];
+                let unknown2 = raw_stats[2].to_le_bytes();
+                let sequence = raw_stats[3];
+                let mut unknown4 = [0u8; 8];
+                unknown4[0..4].copy_from_slice(&raw_stats[87].to_le_bytes());
+                if let Some(t) = current_time_ms {
+                    unknown4[4..8].copy_from_slice(&t.to_le_bytes());
+                }
+
+                return Ok(SyncChecksum {
+                    unknown1,
+                    sync,
+                    unknown2,
+                    sequence,
+                    player_stats,
+                    current_time_ms,
+                    unknown4,
+                });
+            } else {
+                // If reading DE extended block failed (e.g. truncated or unexpected EOF),
+                // rewind back to start_pos + 16 and read trailing 8 bytes gracefully.
+                let _ = reader.seek(SeekFrom::Start(start_pos + 16));
+                let unknown4: [u8; 8] = reader.read_type(endian).unwrap_or([0u8; 8]);
+                let mut unknown1 = [0u8; 8];
+                unknown1[0..4].copy_from_slice(&marker.to_le_bytes());
+                unknown1[4..8].copy_from_slice(&val0.to_le_bytes());
+                return Ok(SyncChecksum {
+                    unknown1,
+                    sync,
+                    unknown2: val2,
+                    sequence,
+                    player_stats: Vec::new(),
+                    current_time_ms: None,
+                    unknown4,
+                });
+            }
+        }
+    }
+
+    // Non-DE or sequence == 0: 8 trailing bytes
+    let unknown4: [u8; 8] = reader.read_type(endian)?;
+    let mut unknown1 = [0u8; 8];
+    unknown1[0..4].copy_from_slice(&marker.to_le_bytes());
+    unknown1[4..8].copy_from_slice(&val0.to_le_bytes());
+    Ok(SyncChecksum {
+        unknown1,
+        sync,
+        unknown2: val2,
+        sequence,
+        player_stats: Vec::new(),
+        current_time_ms: None,
+        unknown4,
+    })
+}
+
+impl Operation {
+    pub fn player_stats(&self) -> Option<&[SyncPlayerStats]> {
+        match self {
+            Operation::Sync {
+                checksum: Some(cs), ..
+            } => Some(&cs.player_stats),
+            _ => None,
+        }
+    }
+
+    pub fn current_time_ms(&self) -> Option<u32> {
+        match self {
+            Operation::Sync {
+                checksum: Some(cs), ..
+            } => cs.current_time_ms,
+            _ => None,
+        }
+    }
 }
 
 #[binrw]

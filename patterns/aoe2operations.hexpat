@@ -498,17 +498,34 @@ namespace aoe2op {
     return std::format("Action: {}", a.action_type);
   };
 
+  struct SyncPlayerStats {
+    u32 unknown0;
+    u32 total_resources;
+    u32 unknown2;
+    u32 displayable_objects;
+    u32 dp_obj_ttl;
+    u32 unknown5;
+    u32 total_objects;
+    u32 unknown7;
+    u32 player_id;
+    u32 unknown9;
+    u32 unknown10;
+  };
+
   struct Sync {
     u32 time_increment;
     if(std::mem::read_unsigned($, 4) == 0) {
-      u8 unknown1[8];
-      u32 sync;
-      u32 unknown2;
-      u32 sequence;
-      if (sequence > 0) {
-        u8 unknown3[332];
+      if (std::mem::read_unsigned($ + 16, 4) > 0) {
+        u32 marker;
+        SyncPlayerStats player_stats[8];
+        u32 current_time;
+      } else {
+        u8 unknown1[8];
+        u32 sync;
+        u32 unknown2;
+        u32 sequence;
+        u8 unknown4[8];
       }
-      u8 unknown4[8];
     }
   };
 
