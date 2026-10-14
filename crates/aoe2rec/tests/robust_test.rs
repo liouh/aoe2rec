@@ -427,3 +427,38 @@ fn test_parse_truncated_de_sync_graceful() {
     }
 }
 
+#[test]
+fn test_pregame_data_is_valid_zero_chapters() {
+    use aoe2rec::PregameData;
+    let pregame = PregameData {
+        checksum_interval: 500,
+        multiplayer: false.into(),
+        rec_owner: 1,
+        reveal_map: true.into(),
+        use_sequence_numbers: false.into(),
+        number_of_chapters: 0,
+        aok_or_de: false.into(),
+    };
+    assert!(pregame.is_valid());
+}
+
+#[test]
+fn test_parse_long_game_replay() {
+    let path = Path::new("replay-long.aoe2record");
+    let save = Savegame::from_file(path).unwrap();
+    assert_eq!(save.chapters.len(), 1);
+    assert_eq!(save.get_duration(), 4906365);
+    assert_eq!(save.operations().count(), 916740);
+    let mut actions = save.operations().filter_map(|op| {
+        if let Operation::Action { world_time, .. } = op {
+            Some(*world_time)
+        } else {
+            None
+        }
+    });
+    let first = actions.next().expect("should have actions");
+    assert_eq!(first, 16);
+}
+
+
+

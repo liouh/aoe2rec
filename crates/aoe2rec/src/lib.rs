@@ -243,7 +243,6 @@ impl PregameData {
     pub fn is_valid(&self) -> bool {
         self.checksum_interval >= 10
             && self.checksum_interval <= 10_000
-            && self.number_of_chapters >= 1
             && self.number_of_chapters <= 1_000
     }
 }
@@ -493,6 +492,12 @@ impl Serialize for Bool32 {
 impl From<Bool32> for bool {
     fn from(val: Bool32) -> Self {
         val.value
+    }
+}
+
+impl From<bool> for Bool32 {
+    fn from(value: bool) -> Self {
+        Bool32 { value }
     }
 }
 
